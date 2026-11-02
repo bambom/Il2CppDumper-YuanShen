@@ -61,8 +61,10 @@ namespace Il2CppDumper
             {
                 outputDir = AppDomain.CurrentDomain.BaseDirectory;
             }
-            il2cppPath = "F:\\Genshin Impact\\Genshin Impact Game\\YuanShen_Data\\Native\\UserAssembly.dll";
-            metadataPath = "C:\\Users\\Sanae\\Desktop\\global-metadata\\global-metadata.dat";
+            // Workspace origin: Genshin PC CTest 1.4 (Unity 2017.4.30f1, encrypted metadata).
+            // orig\UserAssembly - 副本.dll is the preserved pre-patch copy; Native\Data\Metadata is byte-identical to Managed\Metadata.
+            il2cppPath = "E:\\Project-Work\\OriginProject\\Genshin\\YuanShen_Data\\Native\\orig\\UserAssembly - 副本.dll";
+            metadataPath = "E:\\Project-Work\\OriginProject\\Genshin\\YuanShen_Data\\Managed\\Metadata\\global-metadata.dat";
 #if NETFRAMEWORK
             if (il2cppPath == null)
             {
