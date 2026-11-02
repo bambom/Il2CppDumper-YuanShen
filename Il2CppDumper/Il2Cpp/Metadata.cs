@@ -56,7 +56,8 @@ namespace Il2CppDumper
             Version = 24;
             header = ReadClass<Il2CppGlobalMetadataHeader>(0);
 
-            stringDecryptionBlob = File.ReadAllBytes("D:\\genshinimpactre\\decryption_blob.bin");
+            // decryption_blob.bin follows the executable (repo root / build output); no hardcoded machine path.
+            stringDecryptionBlob = File.ReadAllBytes(ResolveBlobPath());
 
             /*if (version == 24)
             {
@@ -288,6 +289,21 @@ namespace Il2CppDumper
             Position = start;
             ReadBytes(Encoding.UTF8.GetByteCount(str));
             return str;
+        }
+
+        private static string ResolveBlobPath()
+        {
+            var candidates = new[]
+            {
+                Path.Combine(AppContext.BaseDirectory, "decryption_blob.bin"),
+                "decryption_blob.bin",
+                Path.Combine(Path.GetDirectoryName(typeof(Metadata).Assembly.Location) ?? ".", "decryption_blob.bin"),
+            };
+            foreach (var candidate in candidates)
+            {
+                if (File.Exists(candidate)) return candidate;
+            }
+            throw new FileNotFoundException("decryption_blob.bin not found beside the executable or in the working directory");
         }
     }
 }

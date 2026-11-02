@@ -62,9 +62,13 @@ namespace Il2CppDumper
                 outputDir = AppDomain.CurrentDomain.BaseDirectory;
             }
             // Workspace origin: Genshin PC CTest 1.4 (Unity 2017.4.30f1, encrypted metadata).
-            // orig\UserAssembly - 副本.dll is the preserved pre-patch copy; Native\Data\Metadata is byte-identical to Managed\Metadata.
-            il2cppPath = "E:\\Project-Work\\OriginProject\\Genshin\\YuanShen_Data\\Native\\orig\\UserAssembly - 副本.dll";
-            metadataPath = "E:\\Project-Work\\OriginProject\\Genshin\\YuanShen_Data\\Managed\\Metadata\\global-metadata.dat";
+            // The encrypted metadata does not carry the 0xFAB11BAF magic, so argument auto-detection
+            // cannot classify it; explicit selection uses IL2CPP_BIN / IL2CPP_META environment variables
+            // (falling back to the workspace defaults below).
+            il2cppPath = Environment.GetEnvironmentVariable("IL2CPP_BIN")
+                ?? "E:\\Project-Work\\OriginProject\\Genshin\\YuanShen_Data\\Native\\orig\\UserAssembly - 副本.dll";
+            metadataPath = Environment.GetEnvironmentVariable("IL2CPP_META")
+                ?? "E:\\Project-Work\\OriginProject\\Genshin\\YuanShen_Data\\Managed\\Metadata\\global-metadata.dat";
 #if NETFRAMEWORK
             if (il2cppPath == null)
             {
