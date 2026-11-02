@@ -202,8 +202,10 @@ namespace Il2CppDumper
                 {
                     if (!flag && il2Cpp is PE)
                     {
-                        Console.WriteLine("Use custom PE loader");
-                        il2Cpp = PELoader.Load(il2cppPath);
+                        // CTest 1.4.50: PELoader.Load would LoadLibrary the game DLL (succeeds locally),
+                        // yielding a relocated memory image whose base != 0x180000000; static file evidence
+                        // must use the raw on-disk PE built at load time. Keep the file-backed instance.
+                        Console.WriteLine("Use raw file PE (CTest static evidence)");
                         il2Cpp.SetProperties(version, metadata.maxMetadataUsages);
                         //flag = il2Cpp.PlusSearch(metadata.methodDefs.Count(x => x.methodIndex >= 0), metadata.typeDefs.Length);
                     }
@@ -223,19 +225,16 @@ namespace Il2CppDumper
                     var codeRegistration = Convert.ToUInt64(Console.ReadLine(), 16);
                     Console.Write("Input MetadataRegistration: ");
                     var metadataRegistration = Convert.ToUInt64(Console.ReadLine(), 16);*/
-                    ProcessModuleCollection pms = Process.GetCurrentProcess().Modules;
-                    ulong baseaddr = 0;
-                    foreach(ProcessModule pm in pms)
-                    {
-                        if(pm.ModuleName == "UserAssembly.dll")
-                        {
-                            baseaddr = (ulong)pm.BaseAddress;
-                            break;
-                        }
-                    }
-                    Console.WriteLine("baseadr: 0x" + baseaddr.ToString("x2"));
-                    var codeRegistration = baseaddr + 0x72A0810;
-                    var metadataRegistration = baseaddr + 0x7FBF040;
+                    // CTest 1.4.50 dev: static file-mode RVAs (imagebase 0x180000000, PELoader maps VA directly).
+                    // Evidence: RecoveryData/Genshin/knowledge/metadata-layout-1.4.50.md - CodeRegistration
+                    // @0xCC371E0 (methodPointers 321927@0xA4F2BD0 ... all arrays verified as .text pointers),
+                    // MetadataRegistration @0xF4EF330 (8 (count,ptr) pairs; typeDefinitionsSizesCount=32501,
+                    // metadataUsagesCount=496279 match metadata file). Retail hardcodes below no longer apply.
+                    const ulong baseaddr = 0x180000000; // PE.MapVATR subtracts ImageBase, so pass full VAs
+                    var codeRegStr = Environment.GetEnvironmentVariable("IL2CPP_CODE_REG");
+                    var metaRegStr = Environment.GetEnvironmentVariable("IL2CPP_META_REG");
+                    var codeRegistration = baseaddr + (codeRegStr != null ? Convert.ToUInt64(codeRegStr, 16) : 0xCC371E0u);
+                    var metadataRegistration = baseaddr + (metaRegStr != null ? Convert.ToUInt64(metaRegStr, 16) : 0xF4EF330u);
                     il2Cpp.Init(codeRegistration, metadataRegistration);
                     return true;
                 }

@@ -165,7 +165,14 @@ namespace Il2CppDumper
             if (!stringCache.TryGetValue(index, out var result))
             {
                 //result = ReadStringToNull(header.stringOffset + index);
-                result = ReadStringToNull(0xE63A28 + index); // CTest 1.4.50 string table (anchored via image nameIdx)
+                // CTest 1.4.50 string table (anchored via image nameIdx). mhy scrambled a periodic subset of
+                // rows (10 typeDefs namespaceIndex stride 2349, 87 methodDefs nameIndex stride 3817); out-of-range
+                // indices would push the stream past 2^31 and abort the dump, so they surface as placeholders.
+                if (index >= 0x3D119C)
+                {
+                    return $"<scrambled:0x{index:X}>";
+                }
+                result = ReadStringToNull(0xE63A28 + index);
                 stringCache.Add(index, result);
             }
             return result;
@@ -227,8 +234,13 @@ namespace Il2CppDumper
                     var offset = metadataUsageList.start + i;
                     if (offset >= metadataUsagePairs.Length) break; // CTest 1.4.50: list ranges clamp to file end
                     var metadataUsagePair = metadataUsagePairs[offset];
+                    // CTest 1.4.50: pair layout is stock v24 {destinationIndex, encodedSourceIndex}. Legit
+                    // destinations span string-literal/field usage slots up to 665183; the binary
+                    // metadataUsages array @RVA 0xC454760 holds 665204 valid pointer entries (measured),
+                    // so destinations >= 665204 plus usage-0/7 words (~343 scrambled pairs) are dropped.
                     var usage = GetEncodedIndexType(metadataUsagePair.encodedSourceIndex);
-                    if (usage == 0 || usage > 6) continue; // CTest 1.4.50: 5 malformed pairs (7) / null usages (0) sampled
+                    if (usage == 0 || usage > 6) continue;
+                    if (metadataUsagePair.destinationIndex >= 665204u) continue;
                     var decodedIndex = GetDecodedMethodIndex(metadataUsagePair.encodedSourceIndex);
                     metadataUsageDic[usage][metadataUsagePair.destinationIndex] = decodedIndex;
                 }

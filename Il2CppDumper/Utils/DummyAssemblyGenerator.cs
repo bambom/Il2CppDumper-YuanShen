@@ -11,6 +11,7 @@ namespace Il2CppDumper
     public class DummyAssemblyGenerator
     {
         public List<AssemblyDefinition> Assemblies = new List<AssemblyDefinition>();
+        private int skippedTypes; // CTest 1.4.50: counter for scrambled typeDef rows skipped in member pass
 
         private Il2CppExecutor executor;
         private Metadata metadata;
@@ -50,6 +51,14 @@ namespace Il2CppDumper
             var parameterDefinitionDic = new Dictionary<int, ParameterDefinition>();
             var propertyDefinitionDic = new Dictionary<int, PropertyDefinition>();
             var eventDefinitionDic = new Dictionary<int, EventDefinition>();
+            // CTest 1.4.50: member rows are shared between types (and across images) in this build; these
+            // map each row to the type whose definition currently owns the dictionary slot, so the
+            // attribute pass never decorates another type's (possibly cross-module) definition.
+            var fieldOwnerDic = new Dictionary<int, TypeDefinition>();
+            var methodOwnerDic = new Dictionary<int, TypeDefinition>();
+            var parameterOwnerDic = new Dictionary<int, TypeDefinition>();
+            var propertyOwnerDic = new Dictionary<int, TypeDefinition>();
+            var eventOwnerDic = new Dictionary<int, TypeDefinition>();
 
             //创建程序集，同时创建所有类
             foreach (var imageDef in metadata.imageDefs)
@@ -81,12 +90,53 @@ namespace Il2CppDumper
                 var typeDefinition = typeDefinitionDic[typeDef];
 
                 //nestedtype
-                for (int i = 0; i < typeDef.nested_type_count; i++)
+                try
                 {
-                    var nestedIndex = metadata.nestedTypeIndices[typeDef.nestedTypesStart + i];
-                    var nestedTypeDef = metadata.typeDefs[nestedIndex];
-                    var nestedTypeDefinition = typeDefinitionDic[nestedTypeDef];
-                    typeDefinition.NestedTypes.Add(nestedTypeDefinition);
+                    for (int i = 0; i < typeDef.nested_type_count; i++)
+                    {
+                        var nestedIndex = metadata.nestedTypeIndices[typeDef.nestedTypesStart + i];
+                        var nestedTypeDef = metadata.typeDefs[nestedIndex];
+                        var nestedTypeDefinition = typeDefinitionDic[nestedTypeDef];
+                        // CTest 1.4.50: scrambled typeDef rows can alias the same nested child twice
+                        // (Mono.Cecil throws "Member already attached"), claim each other as nested
+                        // (A.B + B.A cycles blow the stack in TypeReference.get_DeclaringType), or steal
+                        // a top-level type already attached to another image's module (Cecil would then
+                        // list it in two modules with attributes imported through the wrong one); attach
+                        // only unclaimed, unattached, non-cyclic types.
+                        var ancestor = typeDefinition;
+                        var cyclic = false;
+                        while (ancestor != null)
+                        {
+                            if (ancestor == nestedTypeDefinition) { cyclic = true; break; }
+                            ancestor = ancestor.DeclaringType;
+                        }
+                        if (!cyclic && nestedTypeDefinition.DeclaringType == null && nestedTypeDefinition.Module == null && nestedTypeDefinition != typeDefinition)
+                        {
+                            typeDefinition.NestedTypes.Add(nestedTypeDefinition);
+                        }
+                    }
+                }
+                catch
+                {
+                    // CTest 1.4.50: scrambled nestedTypesStart/count rows - skip nesting for this type.
+                }
+            }
+            // CTest 1.4.50: orphan pass - types whose declaring parent never claimed them (scrambled rows
+            // or cycle-guard skips) would keep Module == null and NullRef on first ImportReference;
+            // attach them as top-level types of their own image module.
+            for (int orphanImage = 0; orphanImage < metadata.imageDefs.Length; orphanImage++)
+            {
+                var orphanImageDef = metadata.imageDefs[orphanImage];
+                // Assemblies[0] is the synthetic Il2CppDummyDll; image i maps to Assemblies[i + 1].
+                var orphanModule = Assemblies[orphanImage + 1].MainModule;
+                var orphanEnd = orphanImageDef.typeStart + orphanImageDef.typeCount;
+                for (int oi = orphanImageDef.typeStart; oi < orphanEnd; oi++)
+                {
+                    var orphanDef = typeDefinitionDic[metadata.typeDefs[oi]];
+                    if (orphanDef.Module == null && orphanDef.DeclaringType == null)
+                    {
+                        orphanModule.Types.Add(orphanDef);
+                    }
                 }
             }
             //提前处理
@@ -94,6 +144,8 @@ namespace Il2CppDumper
             {
                 var typeDef = metadata.typeDefs[index];
                 var typeDefinition = typeDefinitionDic[typeDef];
+                try
+                {
 
                 var customTokenAttribute = new CustomAttribute(typeDefinition.Module.ImportReference(tokenAttribute));
                 customTokenAttribute.Fields.Add(new CustomAttributeNamedArgument("Token", new CustomAttributeArgument(stringType, $"0x{typeDef.token:X}")));
@@ -102,13 +154,20 @@ namespace Il2CppDumper
                 //genericParameter
                 if (typeDef.genericContainerIndex >= 0)
                 {
-                    var genericContainer = metadata.genericContainers[typeDef.genericContainerIndex];
-                    for (int i = 0; i < genericContainer.type_argc; i++)
+                    // CTest 1.4.50: genericContainers table is stream-encrypted (see Il2CppExecutor notes);
+                    // derive arity from the `N suffix of the type name and emit placeholder parameters.
+                    var gpTypeName = metadata.GetStringFromIndex(typeDef.nameIndex);
+                    var gpTick = gpTypeName.LastIndexOf('`');
+                    var gpArity = 0;
+                    if (gpTick >= 0)
                     {
-                        var genericParameterIndex = genericContainer.genericParameterStart + i;
-                        var param = metadata.genericParameters[genericParameterIndex];
-                        var genericParameter = CreateGenericParameter(param, typeDefinition);
-                        typeDefinition.GenericParameters.Add(genericParameter);
+                        int gpEnd = gpTick + 1;
+                        while (gpEnd < gpTypeName.Length && gpTypeName[gpEnd] >= '0' && gpTypeName[gpEnd] <= '9') gpEnd++;
+                        int.TryParse(gpTypeName.Substring(gpTick + 1, gpEnd - gpTick - 1), out gpArity);
+                    }
+                    for (int i = 0; i < gpArity && i < 32; i++)
+                    {
+                        typeDefinition.GenericParameters.Add(new GenericParameter("T" + i, typeDefinition));
                     }
                 }
 
@@ -127,6 +186,13 @@ namespace Il2CppDumper
                     var interfaceTypeRef = GetTypeReference(typeDefinition, interfaceType);
                     typeDefinition.Interfaces.Add(new InterfaceImplementation(interfaceTypeRef));
                 }
+
+                }
+                catch
+                {
+                    // CTest 1.4.50: scrambled parentIndex/interfaceIndices rows - leave this type's
+                    // hierarchy unset rather than aborting the whole dummy-dll export.
+                }
             }
             //处理field, method, property等等
             foreach (var imageDef in metadata.imageDefs)
@@ -137,6 +203,8 @@ namespace Il2CppDumper
                 {
                     var typeDef = metadata.typeDefs[index];
                     var typeDefinition = typeDefinitionDic[typeDef];
+                    try
+                    {
 
                     //field
                     var fieldEnd = typeDef.fieldStart + typeDef.field_count;
@@ -148,7 +216,8 @@ namespace Il2CppDumper
                         var fieldTypeRef = GetTypeReference(typeDefinition, fieldType);
                         var fieldDefinition = new FieldDefinition(fieldName, (FieldAttributes)fieldType.attrs, fieldTypeRef);
                         typeDefinition.Fields.Add(fieldDefinition);
-                        fieldDefinitionDic.Add(i, fieldDefinition);
+                        fieldDefinitionDic[i] = fieldDefinition; // CTest: shared ranges between types make Add throw
+                        fieldOwnerDic[i] = typeDefinition;
 
                         var customTokenAttribute = new CustomAttribute(typeDefinition.Module.ImportReference(tokenAttribute));
                         customTokenAttribute.Fields.Add(new CustomAttributeNamedArgument("Token", new CustomAttributeArgument(stringType, $"0x{fieldDef.token:X}")));
@@ -191,18 +260,10 @@ namespace Il2CppDumper
                         var methodDefinition = new MethodDefinition(methodName, (MethodAttributes)methodDef.flags, typeDefinition.Module.ImportReference(typeof(void)));
                         methodDefinition.ImplAttributes = (MethodImplAttributes)methodDef.iflags;
                         typeDefinition.Methods.Add(methodDefinition);
-                        //genericParameter
-                        if (methodDef.genericContainerIndex >= 0)
-                        {
-                            var genericContainer = metadata.genericContainers[methodDef.genericContainerIndex];
-                            for (int j = 0; j < genericContainer.type_argc; j++)
-                            {
-                                var genericParameterIndex = genericContainer.genericParameterStart + j;
-                                var param = metadata.genericParameters[genericParameterIndex];
-                                var genericParameter = CreateGenericParameter(param, methodDefinition);
-                                methodDefinition.GenericParameters.Add(genericParameter);
-                            }
-                        }
+                        // CTest 1.4.50: genericContainers table is stream-encrypted (see Il2CppExecutor notes);
+                        // method arity is unrecoverable from it and method names carry no `N suffix, so method
+                        // generic parameters are omitted in the static evidence pass (signatures degrade,
+                        // identity tokens stay exact).
                         var methodReturnType = il2Cpp.types[methodDef.returnType];
                         var returnType = GetTypeReferenceWithByRef(methodDefinition, methodReturnType);
                         methodDefinition.ReturnType = returnType;
@@ -233,7 +294,8 @@ namespace Il2CppDumper
                                 ilprocessor.Append(ilprocessor.Create(OpCodes.Ret));
                             }
                         }
-                        methodDefinitionDic.Add(i, methodDefinition);
+                        methodDefinitionDic[i] = methodDefinition; // CTest: shared ranges between types make Add throw
+                        methodOwnerDic[i] = typeDefinition;
                         //method parameter
                         for (var j = 0; j < methodDef.parameterCount; ++j)
                         {
@@ -243,7 +305,8 @@ namespace Il2CppDumper
                             var parameterTypeRef = GetTypeReferenceWithByRef(methodDefinition, parameterType);
                             var parameterDefinition = new ParameterDefinition(parameterName, (ParameterAttributes)parameterType.attrs, parameterTypeRef);
                             methodDefinition.Parameters.Add(parameterDefinition);
-                            parameterDefinitionDic.Add(methodDef.parameterStart + j, parameterDefinition);
+                            parameterDefinitionDic[methodDef.parameterStart + j] = parameterDefinition; // CTest: idempotent
+                                parameterOwnerDic[methodDef.parameterStart + j] = typeDefinition;
                             //ParameterDefault
                             if (metadata.GetParameterDefaultValueFromIndex(methodDef.parameterStart + j, out var parameterDefault) && parameterDefault.dataIndex != -1)
                             {
@@ -306,7 +369,8 @@ namespace Il2CppDumper
                             SetMethod = SetMethod
                         };
                         typeDefinition.Properties.Add(propertyDefinition);
-                        propertyDefinitionDic.Add(i, propertyDefinition);
+                        propertyDefinitionDic[i] = propertyDefinition; // CTest: idempotent
+                        propertyOwnerDic[i] = typeDefinition;
 
                         var customTokenAttribute = new CustomAttribute(typeDefinition.Module.ImportReference(tokenAttribute));
                         customTokenAttribute.Fields.Add(new CustomAttributeNamedArgument("Token", new CustomAttributeArgument(stringType, $"0x{propertyDef.token:X}")));
@@ -328,14 +392,24 @@ namespace Il2CppDumper
                         if (eventDef.raise >= 0)
                             eventDefinition.InvokeMethod = methodDefinitionDic[typeDef.methodStart + eventDef.raise];
                         typeDefinition.Events.Add(eventDefinition);
-                        eventDefinitionDic.Add(i, eventDefinition);
+                        eventDefinitionDic[i] = eventDefinition; // CTest: idempotent
+                        eventOwnerDic[i] = typeDefinition;
 
                         var customTokenAttribute = new CustomAttribute(typeDefinition.Module.ImportReference(tokenAttribute));
                         customTokenAttribute.Fields.Add(new CustomAttributeNamedArgument("Token", new CustomAttributeArgument(stringType, $"0x{eventDef.token:X}")));
                         eventDefinition.CustomAttributes.Add(customTokenAttribute);
                     }
+
+                    }
+                    catch (Exception)
+                    {
+                        // CTest 1.4.50: periodic anti-tamper scrambling corrupts a few rows per table;
+                        // skip this type's members, identity (type/namespace/token) is already emitted.
+                        skippedTypes++;
+                    }
                 }
             }
+            Console.WriteLine($"[CTest] dummy-dll member-skip total: {skippedTypes} (scrambled rows, identity kept)");
             //第三遍，添加CustomAttribute
             if (il2Cpp.Version > 20)
             {
@@ -347,6 +421,10 @@ namespace Il2CppDumper
                     {
                         var typeDef = metadata.typeDefs[index];
                         var typeDefinition = typeDefinitionDic[typeDef];
+                        // CTest 1.4.50: member ranges skipped above leave dictionary holes; attributes for
+                        // those rows are simply absent rather than aborting the export.
+                        try
+                        {
                         //typeAttribute
                         CreateCustomAttribute(imageDef, typeDef.customAttributeIndex, typeDef.token, typeDefinition.Module, typeDefinition.CustomAttributes);
 
@@ -355,6 +433,7 @@ namespace Il2CppDumper
                         for (var i = typeDef.fieldStart; i < fieldEnd; ++i)
                         {
                             var fieldDef = metadata.fieldDefs[i];
+                            if (!fieldOwnerDic.TryGetValue(i, out var fieldOwner) || fieldOwner != typeDefinition) continue; // CTest: row owned by another type
                             var fieldDefinition = fieldDefinitionDic[i];
                             //fieldAttribute
                             CreateCustomAttribute(imageDef, fieldDef.customAttributeIndex, fieldDef.token, typeDefinition.Module, fieldDefinition.CustomAttributes);
@@ -365,6 +444,7 @@ namespace Il2CppDumper
                         for (var i = typeDef.methodStart; i < methodEnd; ++i)
                         {
                             var methodDef = metadata.methodDefs[i];
+                            if (!methodOwnerDic.TryGetValue(i, out var methodOwner) || methodOwner != typeDefinition) continue; // CTest: row owned by another type
                             var methodDefinition = methodDefinitionDic[i];
                             //methodAttribute
                             CreateCustomAttribute(imageDef, methodDef.customAttributeIndex, methodDef.token, typeDefinition.Module, methodDefinition.CustomAttributes);
@@ -373,6 +453,7 @@ namespace Il2CppDumper
                             for (var j = 0; j < methodDef.parameterCount; ++j)
                             {
                                 var parameterDef = metadata.parameterDefs[methodDef.parameterStart + j];
+                                if (!parameterOwnerDic.TryGetValue(methodDef.parameterStart + j, out var paramOwner) || paramOwner != typeDefinition) continue; // CTest: row owned by another type
                                 var parameterDefinition = parameterDefinitionDic[methodDef.parameterStart + j];
                                 //parameterAttribute
                                 CreateCustomAttribute(imageDef, parameterDef.customAttributeIndex, parameterDef.token, typeDefinition.Module, parameterDefinition.CustomAttributes);
@@ -384,6 +465,7 @@ namespace Il2CppDumper
                         for (var i = typeDef.propertyStart; i < propertyEnd; ++i)
                         {
                             var propertyDef = metadata.propertyDefs[i];
+                            if (!propertyOwnerDic.TryGetValue(i, out var propOwner) || propOwner != typeDefinition) continue; // CTest: row owned by another type
                             var propertyDefinition = propertyDefinitionDic[i];
                             //propertyAttribute
                             CreateCustomAttribute(imageDef, propertyDef.customAttributeIndex, propertyDef.token, typeDefinition.Module, propertyDefinition.CustomAttributes);
@@ -394,9 +476,15 @@ namespace Il2CppDumper
                         for (var i = typeDef.eventStart; i < eventEnd; ++i)
                         {
                             var eventDef = metadata.eventDefs[i];
+                            if (!eventOwnerDic.TryGetValue(i, out var eventOwner) || eventOwner != typeDefinition) continue; // CTest: row owned by another type
                             var eventDefinition = eventDefinitionDic[i];
                             //eventAttribute
                             CreateCustomAttribute(imageDef, eventDef.customAttributeIndex, eventDef.token, typeDefinition.Module, eventDefinition.CustomAttributes);
+                        }
+                        }
+                        catch
+                        {
+                            // CTest 1.4.50: holes from skipped members - skip attributes for this type.
                         }
                     }
                 }
@@ -619,12 +707,33 @@ namespace Il2CppDumper
 
         private GenericParameter CreateGenericParameter(Il2CppGenericParameter param, IGenericParameterProvider iGenericParameterProvider)
         {
-            if (!genericParameterDic.TryGetValue(param, out var genericParameter))
+            // CTest 1.4.50: method parameter rows can be shared between methods (same shared-range pattern
+            // as methodDefs); a cached GenericParameter owned by one method breaks Cecil's signature writer,
+            // so a row is only reused when its owner matches. Registering every row before walking
+            // constraints also terminates constraint cycles (this build contains self/mutual-referencing
+            // generic parameter constraints that would otherwise recurse to stack overflow).
+            if (genericParameterDic.TryGetValue(param, out var cached) && cached.Owner == iGenericParameterProvider)
+            {
+                return cached;
+            }
+            GenericParameter genericParameter;
             {
                 var genericName = metadata.GetStringFromIndex(param.nameIndex);
                 genericParameter = new GenericParameter(genericName, iGenericParameterProvider);
                 genericParameter.Attributes = (GenericParameterAttributes)param.flags;
-                genericParameterDic.Add(param, genericParameter);
+                genericParameterDic[param] = genericParameter;
+                // CTest 1.4.50: with genericContainers stream-encrypted, parameters cannot be pre-attached
+                // from container rows; attach on demand instead so every referenced GenericParameter has a
+                // position (Cecil refuses to serialize unattached ones). Positions follow first-reference
+                // order, not the original declaration order - token attributes keep exact identity.
+                if (iGenericParameterProvider is TypeDefinition gpType)
+                {
+                    gpType.GenericParameters.Add(genericParameter);
+                }
+                else if (iGenericParameterProvider is MethodDefinition gpMethod)
+                {
+                    gpMethod.GenericParameters.Add(genericParameter);
+                }
                 for (int i = 0; i < param.constraintsCount; ++i)
                 {
                     var il2CppType = il2Cpp.types[metadata.constraintIndices[param.constraintsStart + i]];

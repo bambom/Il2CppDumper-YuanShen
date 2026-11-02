@@ -187,14 +187,11 @@ namespace Il2CppDumper
 
         public string GetGenericContainerParams(Il2CppGenericContainer genericContainer)
         {
-            var genericParameterNames = new List<string>();
-            for (int i = 0; i < genericContainer.type_argc; i++)
-            {
-                var genericParameterIndex = genericContainer.genericParameterStart + i;
-                var genericParameter = metadata.genericParameters[genericParameterIndex];
-                genericParameterNames.Add(metadata.GetStringFromIndex(genericParameter.nameIndex));
-            }
-            return $"<{string.Join(", ", genericParameterNames)}>";
+            // CTest 1.4.50: the genericContainers table (0xD26898, 12B x 99730) is stream-encrypted in this
+            // build - every row decodes as garbage indices in the 0x1E9xx-0x1F7xx band with per-row keys
+            // (MT19937-style, same family as the pending string-literal key). Until the UserAssembly decoder
+            // routine is reversed, render nothing here; type names still carry their `N arity suffix.
+            return "";
         }
 
         public (string, string) GetMethodSpecName(Il2CppMethodSpec methodSpec, bool addNamespace = false)
