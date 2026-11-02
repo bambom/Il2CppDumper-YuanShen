@@ -75,6 +75,15 @@ namespace Il2CppDumper
                     }
                 }
             }*/
+            // ---- Genshin PC CTest 1.4.50 (dev, 2021-03) build-specific header overrides ----
+            // Derived 2026-11-02 by content cross-validation against this exact global-metadata.dat
+            // (sha256 12ab21e6...): string table anchored via image nameIdx -> mscorlib.dll/System.dll,
+            // tables tile contiguously; genericContainers 99730*12B, interfaces 14132 ints,
+            // nestedTypes 10552 ints. See Projects/RecoveryData/Genshin/knowledge for evidence.
+            header.genericContainersOffset = 0xD26898; header.genericContainersCount = 1196760;
+            header.interfacesOffset = 0xE4AB70; header.interfacesCount = 56528;
+            header.nestedTypesOffset = 0xE58840; header.nestedTypesCount = 42208;
+
             imageDefs = ReadMetadataClassArray<Il2CppImageDefinition>(header.imagesOffset, header.imagesCount);
             typeDefs = ReadMetadataClassArray<Il2CppTypeDefinition>(header.typeDefinitionsOffset, header.typeDefinitionsCount);
             methodDefs = ReadMetadataClassArray<Il2CppMethodDefinition>(header.methodsOffset, header.methodsCount);
@@ -94,7 +103,10 @@ namespace Il2CppDumper
             vtableMethods = ReadClassArray<uint>(header.vtableMethodsOffset, header.vtableMethodsCount / 4);
             if (Version > 16 && Version < 27) //TODO
             {
-                stringLiterals = ReadMetadataClassArray<Il2CppStringLiteral>(0xC7F2C, (int)header.genericContainersOffset - 0xC7F2C); // see notes for how to get this
+                // CTest 1.4.50: string literal entries/data region and this build's 0x5000 key blob are
+                // NOT yet located (retail-1.4 blob does not decrypt this build). Literals are skipped;
+                // identity data (types/methods/fields) is unaffected. PENDING: extract key from UserAssembly.
+                stringLiterals = new Il2CppStringLiteral[0];
                 metadataUsageLists = ReadMetadataClassArray<Il2CppMetadataUsageList>(header.metadataUsageListsOffset, header.metadataUsageListsCount);
                 metadataUsagePairs = ReadMetadataClassArray<Il2CppMetadataUsagePair>(header.metadataUsagePairsOffset, header.metadataUsagePairsCount);
 
@@ -153,7 +165,7 @@ namespace Il2CppDumper
             if (!stringCache.TryGetValue(index, out var result))
             {
                 //result = ReadStringToNull(header.stringOffset + index);
-                result = ReadStringToNull(0xBD494C + index);
+                result = ReadStringToNull(0xE63A28 + index); // CTest 1.4.50 string table (anchored via image nameIdx)
                 stringCache.Add(index, result);
             }
             return result;
@@ -213,8 +225,10 @@ namespace Il2CppDumper
                 for (int i = 0; i < metadataUsageList.count; i++)
                 {
                     var offset = metadataUsageList.start + i;
+                    if (offset >= metadataUsagePairs.Length) break; // CTest 1.4.50: list ranges clamp to file end
                     var metadataUsagePair = metadataUsagePairs[offset];
                     var usage = GetEncodedIndexType(metadataUsagePair.encodedSourceIndex);
+                    if (usage == 0 || usage > 6) continue; // CTest 1.4.50: 5 malformed pairs (7) / null usages (0) sampled
                     var decodedIndex = GetDecodedMethodIndex(metadataUsagePair.encodedSourceIndex);
                     metadataUsageDic[usage][metadataUsagePair.destinationIndex] = decodedIndex;
                 }
